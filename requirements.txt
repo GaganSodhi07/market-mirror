@@ -1,5 +1,4 @@
 yfinance
-pandas-ta
 plotly
 scikit-learn
 streamlit
