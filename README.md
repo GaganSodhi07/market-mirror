@@ -2,7 +2,7 @@
 
 > Find historical market setups similar to today — and see what happened next.
 
-🔗 **Live app:** https://options-regime-decoder-7phl8xei8lef9tvhlwlbx9.streamlit.app
+🔗 **Live app:** https://market-mirror-7phl8xei8lef9tvhlwlbx9.streamlit.app/
 
 ## What it does
 Instead of predicting price, Market Mirror asks:
