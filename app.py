@@ -91,7 +91,7 @@ def calc_macd(close, fast=12, slow=26, signal=9):
     histogram  = macd_line - signal_line
     return macd_line, signal_line, histogram
 
-ddef calc_bbands(close, length=20, std=2):
+def calc_bbands(close, length=20, std=2):
     mid   = calc_sma(close, length)
     sigma = close.rolling(length).std()
     upper = mid + std * sigma
