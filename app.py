@@ -504,3 +504,6 @@ else:
 
     **Supported:** Any US stock (AAPL, TSLA, NVDA) or Indian stock (RELIANCE, INFY, TCS)
     """)
+
+st.divider()
+st.caption("Prepared by Gagan Sodhi | HTW Berlin, Germany")
