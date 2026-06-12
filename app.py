@@ -91,12 +91,48 @@ def calc_macd(close, fast=12, slow=26, signal=9):
     histogram  = macd_line - signal_line
     return macd_line, signal_line, histogram
 
-def calc_bbands(close, length=20, std=2):
+ddef calc_bbands(close, length=20, std=2):
     mid   = calc_sma(close, length)
     sigma = close.rolling(length).std()
     upper = mid + std * sigma
     lower = mid - std * sigma
     return upper, mid, lower
+
+def calc_stochastic(high, low, close, k_period=14, d_period=3):
+    lowest_low   = low.rolling(k_period).min()
+    highest_high = high.rolling(k_period).max()
+    k = (close - lowest_low) / (highest_high - lowest_low).replace(0, np.nan) * 100
+    d = k.rolling(d_period).mean()
+    return k, d
+
+def calc_adx(high, low, close, length=14):
+    # True Range
+    prev_close = close.shift(1)
+    tr = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low  - prev_close).abs()
+    ], axis=1).max(axis=1)
+
+    # Directional movement
+    up_move   = high - high.shift(1)
+    down_move = low.shift(1) - low
+
+    plus_dm  = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+
+    plus_dm  = pd.Series(plus_dm,  index=close.index)
+    minus_dm = pd.Series(minus_dm, index=close.index)
+
+    # Smoothed averages (Wilder)
+    atr      = tr.ewm(alpha=1/length, adjust=False).mean()
+    plus_di  = 100 * plus_dm.ewm(alpha=1/length,  adjust=False).mean() / atr
+    minus_di = 100 * minus_dm.ewm(alpha=1/length, adjust=False).mean() / atr
+
+    dx  = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+    adx = dx.ewm(alpha=1/length, adjust=False).mean()
+
+    return adx, plus_di, minus_di
 
 def build_features(stock_df, etf_df, fwd_days=10):
     df     = stock_df.copy()
@@ -182,6 +218,30 @@ def build_features(stock_df, etf_df, fwd_days=10):
         (close < df["Open"].shift(1)) &
         (close.shift(1) > df["Open"].shift(1))
     ).astype(int)
+
+    # Stochastic Oscillator
+    stoch_k, stoch_d    = calc_stochastic(high, low, close)
+    df["stoch_k"]       = stoch_k
+    df["stoch_d"]       = stoch_d
+    df["stoch_kd_diff"] = stoch_k - stoch_d   # positive = bullish cross
+    df["stoch_zone"]    = pd.cut(stoch_k,
+                                  bins=[0, 20, 45, 55, 80, 100],
+                                  labels=[0, 1, 2, 3, 4]).astype(float)
+
+    # ADX
+    adx, plus_di, minus_di = calc_adx(high, low, close)
+    df["adx"]           = adx
+    df["adx_plus_di"]   = plus_di
+    df["adx_minus_di"]  = minus_di
+    df["adx_trend"]     = pd.cut(adx,
+                                  bins=[0, 20, 25, 40, 100],
+                                  labels=[0, 1, 2, 3]).astype(float)
+    # DI crossover: +1 when +DI crosses above -DI (bullish), -1 when below
+    df["di_cross"]      = 0
+    df.loc[(plus_di > minus_di) &
+           (plus_di.shift(1) <= minus_di.shift(1)), "di_cross"] =  1
+    df.loc[(plus_di < minus_di) &
+           (plus_di.shift(1) >= minus_di.shift(1)), "di_cross"] = -1
 
     # Sector correlation
     df["sector_corr"] = (
@@ -344,9 +404,10 @@ if run_button:
     b5.metric("vs EMA50",    f"{today['price_vs_ema50']:.1f}%")
     b6.metric("Sector corr", f"{today['sector_corr']:.2f}")
 
-    tab1,tab2,tab3,tab4,tab5 = st.tabs([
+    tab1,tab2,tab3,tab4,tab5,tab6 = st.tabs([
         "Similar instances","Return distribution",
-        "Regime clusters","Feature importance","Regression"
+        "Regime clusters","Feature importance","Regression",
+        "Monte Carlo"
     ])
 
     with tab1:
@@ -491,6 +552,130 @@ if run_button:
         st.plotly_chart(fig, use_container_width=True)
         st.caption("Low R² confirms no single indicator predicts returns reliably "
                    "— justifying the multi-feature similarity approach.")
+                   with tab6:
+        st.subheader("Monte Carlo simulation — forward price paths")
+        st.caption(
+            "Simulates 500 possible price paths by sampling from the "
+            "forward returns of similar historical instances."
+        )
+
+        fwd_clean  = similar_df[forward_col].dropna().values
+        spot_price = stock_df["Close"].iloc[-1]
+        n_sims     = 500
+        n_days     = forward_days
+
+        if len(fwd_clean) < 5:
+            st.warning("Not enough similar instances for simulation.")
+        else:
+            # Convert percentage returns to daily step returns
+            daily_returns = fwd_clean / 100 / n_days
+
+            # Run simulations
+            np.random.seed(42)
+            simulations = np.zeros((n_sims, n_days + 1))
+            simulations[:, 0] = spot_price
+
+            for day in range(1, n_days + 1):
+                sampled = np.random.choice(daily_returns, size=n_sims, replace=True)
+                simulations[:, day] = simulations[:, day-1] * (1 + sampled)
+
+            final_prices = simulations[:, -1]
+            pct_up       = (final_prices > spot_price).mean() * 100
+            median_price = np.median(final_prices)
+            p10          = np.percentile(final_prices, 10)
+            p90          = np.percentile(final_prices, 90)
+
+            # Metrics
+            m1,m2,m3,m4 = st.columns(4)
+            m1.metric("Current price",  f"${spot_price:.2f}")
+            m2.metric("Median outcome", f"${median_price:.2f}",
+                      delta=f"{((median_price/spot_price)-1)*100:.1f}%")
+            m3.metric("10th percentile (bear)", f"${p10:.2f}")
+            m4.metric("90th percentile (bull)", f"${p90:.2f}")
+
+            # Fan chart — plot all paths
+            fig = go.Figure()
+
+            # All simulation paths (faint)
+            for i in range(min(200, n_sims)):
+                fig.add_trace(go.Scatter(
+                    x=list(range(n_days + 1)),
+                    y=simulations[i],
+                    mode="lines",
+                    line=dict(width=0.4, color="rgba(127,119,221,0.15)"),
+                    showlegend=False,
+                    hoverinfo="skip"
+                ))
+
+            # Percentile bands
+            p10_path = np.percentile(simulations, 10, axis=0)
+            p50_path = np.percentile(simulations, 50, axis=0)
+            p90_path = np.percentile(simulations, 90, axis=0)
+
+            fig.add_trace(go.Scatter(
+                x=list(range(n_days + 1)), y=p90_path,
+                mode="lines", name="90th percentile",
+                line=dict(width=2, color="#5DCAA5", dash="dash")
+            ))
+            fig.add_trace(go.Scatter(
+                x=list(range(n_days + 1)), y=p50_path,
+                mode="lines", name="Median path",
+                line=dict(width=2.5, color="#7F77DD")
+            ))
+            fig.add_trace(go.Scatter(
+                x=list(range(n_days + 1)), y=p10_path,
+                mode="lines", name="10th percentile",
+                line=dict(width=2, color="#E24B4A", dash="dash")
+            ))
+
+            # Current price line
+            fig.add_hline(y=spot_price, line_dash="dot",
+                          line_color="#888780", line_width=1,
+                          annotation_text="Current price",
+                          annotation_position="right")
+
+            fig.update_layout(
+                title=f"{n_sims} simulated price paths over {n_days} days "
+                      f"(sampled from {len(fwd_clean)} similar historical instances)",
+                xaxis_title="Trading days forward",
+                yaxis_title="Simulated price",
+                height=500,
+                plot_bgcolor="white",
+                paper_bgcolor="white",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02)
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Final price distribution
+            fig2 = go.Figure(go.Histogram(
+                x=final_prices, nbinsx=30,
+                marker_color=["#5DCAA5" if v > spot_price else "#E24B4A"
+                              for v in final_prices],
+                opacity=0.85
+            ))
+            fig2.add_vline(x=spot_price,    line_dash="dash",
+                           line_color="#888780",
+                           annotation_text="Current price",
+                           annotation_position="top left")
+            fig2.add_vline(x=median_price,  line_dash="dot",
+                           line_color="#7F77DD",
+                           annotation_text=f"Median ${median_price:.2f}",
+                           annotation_position="top right")
+            fig2.update_layout(
+                title=f"Distribution of simulated prices after {n_days} days",
+                xaxis_title="Simulated price",
+                yaxis_title="Count",
+                height=350,
+                plot_bgcolor="white",
+                paper_bgcolor="white"
+            )
+            st.plotly_chart(fig2, use_container_width=True)
+
+            st.caption(
+                f"{pct_up:.0f}% of simulated paths ended above current price. "
+                f"Simulation is based on forward returns from the {len(fwd_clean)} "
+                f"most similar historical setups — not random walk assumptions."
+            )
 
 else:
     st.info("Enter a ticker and click **Run analysis** to begin.")
@@ -504,6 +689,6 @@ else:
 
     **Supported:** Any US stock (AAPL, TSLA, NVDA) or Indian stock (RELIANCE, INFY, TCS)
     """)
-
 st.divider()
 st.caption("Prepared by Gagan Sodhi | HTW Berlin, Germany")
+
