@@ -552,7 +552,7 @@ if run_button:
         st.plotly_chart(fig, use_container_width=True)
         st.caption("Low R² confirms no single indicator predicts returns reliably "
                    "— justifying the multi-feature similarity approach.")
-                   with tab6:
+    with tab6:
         st.subheader("Monte Carlo simulation — forward price paths")
         st.caption(
             "Simulates 500 possible price paths by sampling from the "
